@@ -3,11 +3,11 @@ import pandas as pd
 import numpy as np
 
 # ==========================================
-# 1. BACKEND LOGIC (Class xử lý toán học)
+# 1. BACKEND LOGIC
 # ==========================================
 class CampaignOptimizer:
     def __init__(self):
-        # Dữ liệu Hardcode từ Excel + Benchmark Reach thực tế
+        # Dữ liệu Benchmark (Hardcoded)
         self.tiers = ['1K to <10K', '10K to <50K', '50K to <150K', '150K to < 500K', '500K and up']
         self.raw_data = {
             'Instagram': {
@@ -18,7 +18,7 @@ class CampaignOptimizer:
             },
             'Twitter': {
                 'Reach': [4952, 21765, 85206, 266771, 1838483],
-                'Cost_Post': [131.34, 207.33, 504.2, 1490.99, 4656.37], # Cost Tweet
+                'Cost_Post': [131.34, 207.33, 504.2, 1490.99, 4656.37],
                 'Supply': [2907, 2062, 896, 552, 279],
                 'Reach_Rate': [0.15, 0.10, 0.08, 0.05, 0.02]
             },
@@ -39,142 +39,180 @@ class CampaignOptimizer:
                     'Platform': platform,
                     'Tier': tier,
                     'Followers': data['Reach'][i],
-                    'True_Reach': data['Reach'][i] * data['Reach_Rate'][i], # Reach thực tế
+                    'True_Reach': data['Reach'][i] * data['Reach_Rate'][i],
                     'Unit_Price': data['Cost_Post'][i],
                     'Supply': int(data['Supply'][i])
                 }
                 data_list.append(row)
         return pd.DataFrame(data_list)
 
-    def optimize(self, budget, strategy, content_per_kol):
+    def calculate_staff_cost(self, num_kol, num_content, hourly_rate, hours_per_kol, hours_per_content):
+        """Tính chi phí nhân sự dựa trên workload"""
+        total_hours = (num_kol * hours_per_kol) + (num_content * hours_per_content)
+        cost = total_hours * hourly_rate
+        return cost, total_hours
+
+    def optimize(self, total_budget, strategy, content_per_kol, staff_params):
+        """
+        Tối ưu hóa có tính đến Staff Cost.
+        Thuật toán sẽ trừ dần Staff Cost dự kiến khỏi Budget trước khi mua Media.
+        """
         df = self.df_model.copy()
         
-        # Lọc chiến thuật
+        # 1. Filter Strategy
         if strategy == "mass_seeding":
             target_tiers = ['1K to <10K', '10K to <50K']
             df = df[df['Tier'].isin(target_tiers)]
-        
-        # Tính toán chi phí & ROI
+
+        # 2. Chuẩn bị số liệu
         df['Pack_Cost'] = df['Unit_Price'] * content_per_kol
         df['ROI'] = df['True_Reach'] / df['Pack_Cost']
         df = df.sort_values(by='ROI', ascending=False)
         
-        # Phân bổ ngân sách
+        # 3. Allocation Loop (Phức tạp hơn vì OpCost thay đổi dynamic)
+        # Cách tiếp cận đơn giản hóa: Trừ trước một khoản "Buffer" cho Staff Cost
+        # hoặc tính toán Step-by-step. Ở đây dùng Step-by-step greedy.
+        
         allocations = []
-        remaining_budget = budget
+        remaining_budget = total_budget
+        current_kols = 0
+        current_content = 0
+        
+        # Tạo bảng tạm để lưu kết quả
+        df['Participants'] = 0
+        
+        # Vòng lặp mua từng người một (Greedy từng bước) để check budget thực tế
+        # Lưu ý: Cách này chậm hơn nhưng chính xác cho bài toán phụ thuộc biến số
+        # Để nhanh hơn cho web app, ta dùng ước lượng theo lô (Batch)
         
         for index, row in df.iterrows():
             if remaining_budget <= 0:
-                allocations.append(0)
                 continue
             
-            cost = row['Pack_Cost']
+            unit_price = row['Pack_Cost']
             supply = row['Supply']
             
-            if cost > 0:
-                max_affordable = int(remaining_budget // cost)
-                count = min(max_affordable, supply)
+            # Ước tính chi phí quản lý cho 1 KOL thêm vào
+            # Marginal Op Cost = (1 * setup_time + content_count * manage_time) * hourly_rate
+            marginal_op_cost = (staff_params['setup_time'] + content_per_kol * staff_params['manage_time']) * staff_params['rate']
+            
+            total_unit_cost = unit_price + marginal_op_cost
+            
+            if total_unit_cost > remaining_budget:
+                count = int(remaining_budget // total_unit_cost)
             else:
-                count = 0
+                max_buyable = int(remaining_budget // total_unit_cost)
+                count = min(max_buyable, supply)
             
-            allocations.append(count)
-            remaining_budget -= count * cost
-            
-        df['Participants'] = allocations
-        df['Total_Cost'] = df['Participants'] * df['Pack_Cost']
+            if count > 0:
+                df.at[index, 'Participants'] = count
+                cost_media = count * unit_price
+                cost_op = count * marginal_op_cost
+                remaining_budget -= (cost_media + cost_op)
+                
+                current_kols += count
+                current_content += count * content_per_kol
+
+        # 4. Tính toán tổng kết
+        df['Media_Cost'] = df['Participants'] * df['Pack_Cost']
         df['Total_True_Reach'] = df['Participants'] * df['True_Reach']
         df['Total_Content'] = df['Participants'] * content_per_kol
         
-        return df[df['Participants'] > 0].copy(), remaining_budget
+        # Tính lại Staff Cost chính xác lần cuối
+        final_op_cost, final_hours = self.calculate_staff_cost(
+            df['Participants'].sum(), 
+            df['Total_Content'].sum(),
+            staff_params['rate'],
+            staff_params['setup_time'],
+            staff_params['manage_time']
+        )
+        
+        return df[df['Participants'] > 0].copy(), remaining_budget, final_op_cost, final_hours
 
 # ==========================================
-# 2. STREAMLIT FRONTEND (Giao diện)
+# 2. STREAMLIT UI
 # ==========================================
+st.set_page_config(page_title="KOL Budget & Staff Optimizer", layout="wide", page_icon="💼")
 
-# Cấu hình trang
-st.set_page_config(page_title="KOL Budget Optimizer", layout="wide", page_icon="📊")
+st.title("💼 KOL Campaign Budget & Staff Workload Optimizer")
+st.markdown("Tối ưu ngân sách bao gồm cả **Chi phí Media (Booking)** và **Chi phí Vận hành (Staff Hours)**.")
 
-# Header
-st.title("📊 KOL Campaign Budget Optimizer")
-st.markdown("Công cụ tối ưu hóa phân bổ ngân sách Influencer Marketing dựa trên **True Reach**.")
-
-# --- SIDEBAR: INPUT ---
-st.sidebar.header("⚙️ Cấu hình Campaign")
-
-# 1. Nhập ngân sách
-budget_input = st.sidebar.number_input("Tổng Ngân sách ($)", value=22000, step=1000, format="%d")
-
-# 2. Chọn chiến thuật
-strategy_mode = st.sidebar.selectbox(
-    "Chiến thuật Campaign",
-    ("Mass Seeding (Focus Nano/Micro)", "Max Reach (All Tiers)")
-)
-# Map selection về key code
+# --- SIDEBAR ---
+st.sidebar.header("1. Ngân sách & Chiến thuật")
+budget_input = st.sidebar.number_input("Tổng Ngân sách ($)", value=22000, step=1000)
+strategy_mode = st.sidebar.selectbox("Chiến thuật", ("Mass Seeding (Focus 1K-50K)", "Max Reach (All Tiers)"))
 strat_key = "mass_seeding" if "Mass Seeding" in strategy_mode else "max_reach"
+content_input = st.sidebar.slider("Số post/KOL", 1, 5, 1)
 
-# 3. Số lượng content
-content_input = st.sidebar.slider("Số bài đăng mỗi KOL (Content Count)", 1, 5, 1)
+st.sidebar.header("2. Chi phí Nhân sự (Staff)")
+hourly_rate = st.sidebar.number_input("Lương nhân viên ($/giờ)", value=20.0, step=5.0)
+setup_time = st.sidebar.number_input("Giờ setup mỗi KOL (Tìm, Deal)", value=2.0, step=0.5)
+manage_time = st.sidebar.number_input("Giờ quản lý mỗi Post (Duyệt, Report)", value=1.5, step=0.5)
 
-st.sidebar.markdown("---")
-st.sidebar.markdown("ℹ️ **Ghi chú:**\n- **Mass Seeding:** Chỉ chọn KOL 1K-50K Follower.\n- **True Reach:** Đã trừ % ảo.")
+staff_params = {
+    'rate': hourly_rate,
+    'setup_time': setup_time,
+    'manage_time': manage_time
+}
 
-# --- MAIN: PROCESS ---
+# --- MAIN ---
 optimizer = CampaignOptimizer()
 
-if st.sidebar.button("🚀 Chạy Tối Ưu Hóa", type="primary"):
-    with st.spinner('Đang tính toán phân bổ tốt nhất...'):
-        result_df, remainder = optimizer.optimize(budget_input, strat_key, content_input)
+if st.sidebar.button("🚀 Tính Toán & Tối Ưu", type="primary"):
+    with st.spinner('Đang cân đối giữa Booking và Staffing...'):
+        result_df, remainder, op_cost, staff_hours = optimizer.optimize(
+            budget_input, strat_key, content_input, staff_params
+        )
 
-    # --- MAIN: DISPLAY RESULTS ---
     if result_df.empty:
-        st.error("Ngân sách quá thấp, không thể thuê được KOL nào trong nhóm này!")
+        st.error("Không thể tối ưu với ngân sách này (Chi phí vận hành có thể quá cao).")
     else:
-        # 1. Key Metrics Row
-        total_spend = result_df['Total_Cost'].sum()
+        # Metrics
+        media_spend = result_df['Media_Cost'].sum()
         total_reach = result_df['Total_True_Reach'].sum()
         total_kols = result_df['Participants'].sum()
-        total_contents = result_df['Total_Content'].sum()
+        
+        # Layout Top
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Tổng Reach Thực Tế", f"{total_reach:,.0f}")
+        c2.metric("Số lượng KOLs", f"{total_kols:,.0f} người")
+        c3.metric("Tổng Giờ Công (Staff Hours)", f"{staff_hours:,.1f} giờ", help="Tổng thời gian cần thiết để vận hành campaign này")
 
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Tổng Chi Phí", f"${total_spend:,.2f}", f"Dư: ${remainder:,.2f}")
-        col2.metric("Tổng KOLs", f"{total_kols:,.0f} người")
-        col3.metric("Tổng Nội Dung", f"{total_contents:,.0f} posts")
-        col4.metric("Reach Thực Tế (Est)", f"{total_reach:,.0f} views", delta_color="normal")
+        st.divider()
 
-        st.markdown("---")
-
-        # 2. Charts & Data Row
-        c_chart, c_table = st.columns([1, 2])
-
-        with c_chart:
-            st.subheader("💰 Phân bổ theo Platform")
-            # Group by Platform để vẽ biểu đồ
-            platform_spend = result_df.groupby('Platform')['Total_Cost'].sum().reset_index()
-            st.bar_chart(platform_spend, x='Platform', y='Total_Cost', color='Platform')
-            
-            st.subheader("👥 Phân bổ theo Tier")
-            tier_count = result_df.groupby('Tier')['Participants'].sum().reset_index()
-            st.dataframe(tier_count, hide_index=True, use_container_width=True)
-
-        with c_table:
-            st.subheader("📋 Kế hoạch chi tiết")
-            # Format lại bảng cho đẹp
-            display_df = result_df[['Platform', 'Tier', 'Participants', 'Total_Content', 'Total_Cost', 'Total_True_Reach']].copy()
-            display_df = display_df.rename(columns={
-                'Participants': 'Số KOL',
-                'Total_Content': 'Số Post',
-                'Total_Cost': 'Chi Phí ($)',
-                'Total_True_Reach': 'Reach (Est)'
+        # Breakdown Budget (Visual quan trọng)
+        st.subheader("💸 Phân bổ Ngân sách Tổng ($)")
+        
+        col_chart, col_data = st.columns([1, 1])
+        
+        with col_chart:
+            # Pie Chart: Media vs Staff vs Remainder
+            cost_data = pd.DataFrame({
+                'Category': ['Media Booking', 'Staff Operation', 'Unused'],
+                'Amount': [media_spend, op_cost, remainder]
             })
-            st.dataframe(
-                display_df,
-                hide_index=True,
-                use_container_width=True,
-                column_config={
-                    "Chi Phí ($)": st.column_config.NumberColumn(format="$%.2f"),
-                    "Reach (Est)": st.column_config.NumberColumn(format="%d")
-                }
+            st.altair_chart(
+                pd.DataFrame(cost_data).set_index('Category').plot.pie(y='Amount', figsize=(5, 5), legend=False).figure if False else None # Fallback logic placeholder
             )
+            # Dùng st.bar_chart đơn giản hơn cho Streamlit
+            st.bar_chart(cost_data.set_index('Category'))
+            
+        with col_data:
+            st.write(f"**1. Chi phí Booking (Media):** ${media_spend:,.2f}")
+            st.write(f"**2. Chi phí Vận hành (Staff):** ${op_cost:,.2f} ({op_cost/budget_input*100:.1f}%)")
+            st.write(f"   - Đơn giá: ${hourly_rate}/h")
+            st.write(f"   - Tổng giờ: {staff_hours:.1f}h")
+            st.write(f"**3. Dư:** ${remainder:,.2f}")
+            st.markdown("---")
+            if staff_hours > 160: # Cảnh báo nếu > 1 tháng làm việc của 1 người
+                st.warning(f"⚠️ Cảnh báo: {staff_hours:.0f} giờ tương đương khối lượng công việc của ~{staff_hours/160:.1f} nhân viên full-time trong 1 tháng!")
+
+        # Detailed Table
+        st.subheader("📋 Danh sách KOL phân bổ")
+        st.dataframe(
+            result_df[['Platform', 'Tier', 'Participants', 'Total_Content', 'Media_Cost', 'Total_True_Reach']],
+            use_container_width=True
+        )
 
 else:
-    st.info("👈 Nhập thông số ở Sidebar và bấm 'Chạy Tối Ưu Hóa' để xem kết quả.")
+    st.info("👈 Nhập thông số Staff Cost ở Sidebar để thấy sự ảnh hưởng đến ngân sách.")
