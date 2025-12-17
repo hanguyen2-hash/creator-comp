@@ -53,10 +53,6 @@ class CampaignOptimizer:
         return cost, total_hours
 
     def optimize(self, total_budget, strategy, content_per_kol, staff_params):
-        """
-        Tối ưu hóa có tính đến Staff Cost.
-        Thuật toán sẽ trừ dần Staff Cost dự kiến khỏi Budget trước khi mua Media.
-        """
         df = self.df_model.copy()
         
         # 1. Filter Strategy
@@ -69,21 +65,12 @@ class CampaignOptimizer:
         df['ROI'] = df['True_Reach'] / df['Pack_Cost']
         df = df.sort_values(by='ROI', ascending=False)
         
-        # 3. Allocation Loop (Phức tạp hơn vì OpCost thay đổi dynamic)
-        # Cách tiếp cận đơn giản hóa: Trừ trước một khoản "Buffer" cho Staff Cost
-        # hoặc tính toán Step-by-step. Ở đây dùng Step-by-step greedy.
-        
+        # 3. Allocation Loop
         allocations = []
         remaining_budget = total_budget
-        current_kols = 0
-        current_content = 0
         
         # Tạo bảng tạm để lưu kết quả
         df['Participants'] = 0
-        
-        # Vòng lặp mua từng người một (Greedy từng bước) để check budget thực tế
-        # Lưu ý: Cách này chậm hơn nhưng chính xác cho bài toán phụ thuộc biến số
-        # Để nhanh hơn cho web app, ta dùng ước lượng theo lô (Batch)
         
         for index, row in df.iterrows():
             if remaining_budget <= 0:
@@ -92,8 +79,7 @@ class CampaignOptimizer:
             unit_price = row['Pack_Cost']
             supply = row['Supply']
             
-            # Ước tính chi phí quản lý cho 1 KOL thêm vào
-            # Marginal Op Cost = (1 * setup_time + content_count * manage_time) * hourly_rate
+            # Tính Marginal Op Cost
             marginal_op_cost = (staff_params['setup_time'] + content_per_kol * staff_params['manage_time']) * staff_params['rate']
             
             total_unit_cost = unit_price + marginal_op_cost
@@ -109,9 +95,6 @@ class CampaignOptimizer:
                 cost_media = count * unit_price
                 cost_op = count * marginal_op_cost
                 remaining_budget -= (cost_media + cost_op)
-                
-                current_kols += count
-                current_content += count * content_per_kol
 
         # 4. Tính toán tổng kết
         df['Media_Cost'] = df['Participants'] * df['Pack_Cost']
@@ -186,15 +169,11 @@ if st.sidebar.button("🚀 Tính Toán & Tối Ưu", type="primary"):
         col_chart, col_data = st.columns([1, 1])
         
         with col_chart:
-            # Pie Chart: Media vs Staff vs Remainder
+            # SỬA LỖI: Dùng Bar Chart đơn giản thay vì Altair Pie Chart gây lỗi
             cost_data = pd.DataFrame({
-                'Category': ['Media Booking', 'Staff Operation', 'Unused'],
+                'Category': ['1. Booking (Media)', '2. Staff Ops', '3. Dư (Buffer)'],
                 'Amount': [media_spend, op_cost, remainder]
             })
-            st.altair_chart(
-                pd.DataFrame(cost_data).set_index('Category').plot.pie(y='Amount', figsize=(5, 5), legend=False).figure if False else None # Fallback logic placeholder
-            )
-            # Dùng st.bar_chart đơn giản hơn cho Streamlit
             st.bar_chart(cost_data.set_index('Category'))
             
         with col_data:
@@ -204,14 +183,22 @@ if st.sidebar.button("🚀 Tính Toán & Tối Ưu", type="primary"):
             st.write(f"   - Tổng giờ: {staff_hours:.1f}h")
             st.write(f"**3. Dư:** ${remainder:,.2f}")
             st.markdown("---")
-            if staff_hours > 160: # Cảnh báo nếu > 1 tháng làm việc của 1 người
+            if staff_hours > 160: 
                 st.warning(f"⚠️ Cảnh báo: {staff_hours:.0f} giờ tương đương khối lượng công việc của ~{staff_hours/160:.1f} nhân viên full-time trong 1 tháng!")
 
         # Detailed Table
         st.subheader("📋 Danh sách KOL phân bổ")
+        # Format cột tiền tệ hiển thị cho đẹp
+        display_df = result_df[['Platform', 'Tier', 'Participants', 'Total_Content', 'Media_Cost', 'Total_True_Reach']].copy()
+        display_df.rename(columns={'Media_Cost': 'Media Cost ($)', 'Participants': 'KOLs'}, inplace=True)
+        
         st.dataframe(
-            result_df[['Platform', 'Tier', 'Participants', 'Total_Content', 'Media_Cost', 'Total_True_Reach']],
-            use_container_width=True
+            display_df,
+            use_container_width=True,
+            column_config={
+                "Media Cost ($)": st.column_config.NumberColumn(format="$%.2f"),
+                "Total_True_Reach": st.column_config.NumberColumn(format="%d")
+            }
         )
 
 else:
