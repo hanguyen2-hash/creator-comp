@@ -7,10 +7,7 @@ import numpy as np
 # ==========================================
 class CampaignOptimizer:
     def __init__(self):
-        # Dữ liệu gốc
         self.tiers = ['1K to <10K', '10K to <50K', '50K to <150K', '150K to < 500K', '500K and up']
-        
-        # Mapping 1-1 cho 5 nhóm
         self.tier_groups = {
             'Nano (1K-10K)':     ['1K to <10K'],
             'Micro (10K-50K)':   ['10K to <50K'],
@@ -18,8 +15,6 @@ class CampaignOptimizer:
             'Macro (150K-500K)': ['150K to < 500K'],
             'Mega (>500K)':      ['500K and up']
         }
-        
-        # Hardcoded Data
         self.raw_data = {
             'Instagram': {
                 'Reach': [3258, 21417, 87664, 264830, 2206768],
@@ -104,34 +99,30 @@ class CampaignOptimizer:
         return pd.DataFrame(), total_budget
 
 # ==========================================
-# 2. STREAMLIT UI - 5 TIERS & HISTORICAL DATA
+# 2. STREAMLIT UI - AUTO BALANCING
 # ==========================================
-st.set_page_config(page_title="5-Tier Campaign Planner", layout="wide", page_icon="⚡")
+st.set_page_config(page_title="Auto-Balancing Planner", layout="wide", page_icon="⚖️")
 
-st.title("⚡ Kế hoạch Phân bổ Ngân sách (5 Nhóm Influencer)")
-st.markdown("Tối ưu hóa chi tiết cho 5 phân khúc: **Nano, Micro, Mid, Macro, Mega**.")
+st.title("⚖️ Smart Budget Planner (Auto-Balancing)")
+st.markdown("Simply adjust the sliders for the larger groups, and the **Nano (Seeding)** group will automatically balance the remaining budget to reach 100%.")
 
-# --- DỮ LIỆU HISTORICAL TEMPLATES (Updated for 5 Tiers) ---
+# --- HISTORICAL TEMPLATES ---
 HISTORICAL_TEMPLATES = {
-    "Tự chỉnh (Custom)": 
-        {'nano': 20, 'micro': 20, 'mid': 20, 'macro': 20, 'mega': 20, 'desc': "Tự do điều chỉnh."},
+    "Custom (Manual)": 
+        {'micro': 20, 'mid': 20, 'macro': 20, 'mega': 20, 'desc': "Fully manual adjustment."},
     
     "🚀 Launching (Mass Seeding)": 
-        {'nano': 50, 'micro': 30, 'mid': 20, 'macro': 0, 'mega': 0, 
-         'desc': "Dồn 80% ngân sách cho Nano & Micro để tạo hiệu ứng 'ai cũng nhắc tới'."},
+        {'micro': 30, 'mid': 20, 'macro': 0, 'mega': 0, 
+         'desc': "Micro & Mid take 50%, the remaining 50% is automatically allocated to Nano for mass seeding."},
          
     "💎 Branding (Big Image)": 
-        {'nano': 0, 'micro': 0, 'mid': 10, 'macro': 40, 'mega': 50, 
-         'desc': "90% ngân sách cho Macro & Mega để xây dựng hình ảnh thương hiệu đẳng cấp."},
-         
-    "⚖️ Conversion (Performance)": 
-        {'nano': 10, 'micro': 40, 'mid': 40, 'macro': 10, 'mega': 0, 
-         'desc': "Tập trung mạnh vào Micro & Mid-tier (80%) - nhóm có ROI và Conversion tốt nhất."},
+        {'micro': 0, 'mid': 10, 'macro': 40, 'mega': 50, 
+         'desc': "90% budget for Macro & Mega. Nano automatically drops to 0."},
 }
 
 # --- SESSION STATE ---
-# Khởi tạo mặc định
-defaults = {'nano': 20, 'micro': 20, 'mid': 20, 'macro': 20, 'mega': 20}
+# Only need to store state for the 4 active sliders. Nano is calculated.
+defaults = {'micro': 20, 'mid': 20, 'macro': 20, 'mega': 20}
 for k, v in defaults.items():
     if f'alloc_{k}' not in st.session_state:
         st.session_state[f'alloc_{k}'] = v
@@ -139,59 +130,71 @@ for k, v in defaults.items():
 def update_sliders():
     selected = st.session_state.template_selector
     vals = HISTORICAL_TEMPLATES[selected]
-    st.session_state['alloc_nano'] = vals['nano']
+    # Update the 4 main groups
     st.session_state['alloc_micro'] = vals['micro']
     st.session_state['alloc_mid'] = vals['mid']
     st.session_state['alloc_macro'] = vals['macro']
     st.session_state['alloc_mega'] = vals['mega']
-    if selected != "Tự chỉnh (Custom)":
-        st.toast(f"Đã áp dụng mẫu: {selected}", icon="✅")
+    if selected != "Custom (Manual)":
+        st.toast(f"Template applied: {selected}", icon="✅")
 
-# --- SIDEBAR CONTROL ---
-st.sidebar.header("1. Cấu hình & Ngân sách")
-budget_input = st.sidebar.number_input("Tổng Ngân sách ($)", value=22000, step=1000)
-content_input = st.sidebar.number_input("Số bài đăng/KOL", value=1, min_value=1)
+# --- SIDEBAR ---
+st.sidebar.header("1. Configuration")
+budget_input = st.sidebar.number_input("Total Budget ($)", value=22000, step=1000)
+content_input = st.sidebar.number_input("Content per KOL", value=1, min_value=1)
 
 st.sidebar.markdown("---")
-st.sidebar.header("2. Chọn Template Chiến Dịch")
+st.sidebar.header("2. Select Strategy")
 template_choice = st.sidebar.selectbox(
-    "Mục tiêu là gì?",
+    "Objective:",
     options=list(HISTORICAL_TEMPLATES.keys()),
-    index=1,
+    index=0,
     key="template_selector",
     on_change=update_sliders
 )
 st.sidebar.info(HISTORICAL_TEMPLATES[template_choice]['desc'])
 
 st.sidebar.markdown("---")
-st.sidebar.header("3. Điều chỉnh Tỷ lệ (Total: 100%)")
+st.sidebar.header("3. Allocation (Nano Auto-fills)")
 
-# 5 SLIDERS
-col_s1, col_s2, col_s3, col_s4, col_s5 = st.sidebar.columns([1,1,1,1,1]) # Trick to align if needed, but sidebar is vertical
-# Vertical Sliders
-a_nano = st.sidebar.slider("Nano (1-10K)", 0, 100, st.session_state['alloc_nano'], key="slider_nano")
-a_micro = st.sidebar.slider("Micro (10-50K)", 0, 100, st.session_state['alloc_micro'], key="slider_micro")
-a_mid = st.sidebar.slider("Mid (50-150K)", 0, 100, st.session_state['alloc_mid'], key="slider_mid")
-a_macro = st.sidebar.slider("Macro (150-500K)", 0, 100, st.session_state['alloc_macro'], key="slider_macro")
+# 4 ACTIVE SLIDERS
+# User adjusts these 4
+a_micro = st.sidebar.slider("Micro (10K-50K)", 0, 100, st.session_state['alloc_micro'], key="slider_micro")
+a_mid = st.sidebar.slider("Mid (50K-150K)", 0, 100, st.session_state['alloc_mid'], key="slider_mid")
+a_macro = st.sidebar.slider("Macro (150K-500K)", 0, 100, st.session_state['alloc_macro'], key="slider_macro")
 a_mega = st.sidebar.slider("Mega (>500K)", 0, 100, st.session_state['alloc_mega'], key="slider_mega")
 
-# Validation
-total_alloc = a_nano + a_micro + a_mid + a_macro + a_mega
-if total_alloc != 100:
-    st.sidebar.error(f"⚠️ Tổng: {total_alloc}% (Cần chỉnh về 100%)")
+# CALCULATE NANO (BALANCING)
+total_others = a_micro + a_mid + a_macro + a_mega
+a_nano_calc = 100 - total_others
+
+# VALIDATION & DISPLAY NANO
+valid = False
+if a_nano_calc < 0:
+    st.sidebar.error(f"⚠️ Total is {total_others}%. Please reduce by {abs(a_nano_calc)}%!")
+    st.sidebar.progress(100, text="Nano: 0% (Over Budget)")
     valid = False
 else:
-    st.sidebar.success("✅ Tổng: 100% (Hợp lệ)")
+    # Display Nano as a Disabled Slider for visualization
+    st.sidebar.slider(
+        f"✅ Nano (1K-10K) - Auto Balanced", 
+        0, 100, a_nano_calc, 
+        disabled=True, 
+        key="slider_nano_display",
+        help="The Nano group automatically takes the remaining budget percentage."
+    )
+    if a_nano_calc > 0:
+        st.sidebar.info(f"Remaining {a_nano_calc}% allocated to Nano Seeding.")
     valid = True
 
-# --- MAIN ---
+# --- MAIN APP ---
 optimizer = CampaignOptimizer()
 
-if valid and st.button("🚀 Chạy Kế Hoạch", type="primary"):
+if valid and st.button("🚀 Optimize Budget", type="primary"):
     
     # Map input -> Logic
     alloc_map = {
-        'Nano (1K-10K)':     a_nano / 100.0,
+        'Nano (1K-10K)':     a_nano_calc / 100.0, # Use calculated value
         'Micro (10K-50K)':   a_micro / 100.0,
         'Mid (50K-150K)':    a_mid / 100.0,
         'Macro (150K-500K)': a_macro / 100.0,
@@ -201,47 +204,50 @@ if valid and st.button("🚀 Chạy Kế Hoạch", type="primary"):
     result_df, remainder = optimizer.optimize_allocation(budget_input, alloc_map, content_input)
     
     if result_df.empty:
-        st.warning("Không tìm thấy phương án tối ưu cho cấu hình này.")
+        st.warning("No optimal plan found for this configuration.")
     else:
-        # Metrics Row
+        # Metrics
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Tổng Reach (Est)", f"{result_df['Total_Reach'].sum():,.0f}")
-        c2.metric("Số lượng KOL", f"{result_df['Participants'].sum():,.0f}")
-        c3.metric("Chi tiêu", f"${result_df['Total_Cost'].sum():,.0f}")
-        c4.metric("Dư ngân sách", f"${remainder:,.0f}")
+        c1.metric("Total Est. Reach", f"{result_df['Total_Reach'].sum():,.0f}")
+        c2.metric("Total KOLs", f"{result_df['Participants'].sum():,.0f}")
+        c3.metric("Total Spend", f"${result_df['Total_Cost'].sum():,.0f}")
+        c4.metric("Remaining Budget", f"${remainder:,.0f}")
         
         st.divider()
         
-        # Charts Area
+        # Charts
         c_chart, c_data = st.columns([1, 1])
         
         with c_chart:
-            st.subheader("💰 Phân bổ tiền tệ")
-            # Order tiers for chart logic
+            st.subheader("💰 Budget Allocation")
             tier_order = ['Nano (1K-10K)', 'Micro (10K-50K)', 'Mid (50K-150K)', 'Macro (150K-500K)', 'Mega (>500K)']
+            # Reindex to ensure consistent order and color mapping
             chart_df = result_df.groupby('Group')['Total_Cost'].sum().reindex(tier_order, fill_value=0).reset_index()
             st.bar_chart(chart_df.set_index('Group'))
             
         with c_data:
-            st.subheader("📊 Tỷ trọng Reach")
+            st.subheader("📊 Reach Distribution")
             reach_df = result_df.groupby('Group')['Total_Reach'].sum().reindex(tier_order, fill_value=0).reset_index()
-            st.bar_chart(reach_df.set_index('Group'), color="#00CC96") # Màu khác cho dễ phân biệt
+            st.bar_chart(reach_df.set_index('Group'), color="#00CC96")
 
-        # Detailed Table
-        st.subheader("📋 Kế hoạch chi tiết theo từng Platform")
-        
-        # Pivot table cho dễ nhìn: Cột là Tier, Dòng là Platform
-        summary = result_df.groupby(['Platform', 'Group']).agg({
-            'Participants': 'sum',
-            'Total_Cost': 'sum'
+        # Table
+        st.subheader("📋 Detailed Plan")
+        summary = result_df.groupby(['Group', 'Platform']).agg({
+            'Participants': 'sum', 
+            'Total_Cost': 'sum',
+            'Total_Reach': 'sum'
         }).reset_index()
         
-        # Format cột tiền
         summary['Total_Cost'] = summary['Total_Cost'].apply(lambda x: f"${x:,.0f}")
+        summary['Total_Reach'] = summary['Total_Reach'].apply(lambda x: f"{x:,.0f}")
         
         st.dataframe(
             summary, 
-            use_container_width=True,
-            column_order=("Group", "Platform", "Participants", "Total_Cost"),
-            hide_index=True
+            use_container_width=True, 
+            hide_index=True,
+            column_config={
+                "Participants": "KOL Count",
+                "Total_Cost": "Cost",
+                "Total_Reach": "Est. Reach"
+            }
         )
