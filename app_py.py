@@ -52,9 +52,18 @@ class CampaignOptimizer:
                 data_list.append(row)
         return pd.DataFrame(data_list)
 
-    def optimize_segment(self, segment_budget, target_tiers, content_per_kol):
+    def optimize_segment(self, segment_budget, target_tiers, content_per_kol, selected_platforms):
+        """
+        Optimizes for a specific budget segment, filtered by tiers AND platforms.
+        """
         if segment_budget <= 0: return pd.DataFrame()
-        df = self.df_model[self.df_model['Tier'].isin(target_tiers)].copy()
+        
+        # FILTER: Only keep rows where Tier is in target_tiers AND Platform is in selected_platforms
+        mask = (self.df_model['Tier'].isin(target_tiers)) & (self.df_model['Platform'].isin(selected_platforms))
+        df = self.df_model[mask].copy()
+        
+        if df.empty: return pd.DataFrame()
+
         df['Pack_Cost'] = df['Unit_Price'] * content_per_kol
         df['ROI'] = df['True_Reach'] / df['Pack_Cost']
         df = df.sort_values(by='ROI', ascending=False)
@@ -77,13 +86,18 @@ class CampaignOptimizer:
         
         return df[df['Participants'] > 0].copy()
 
-    def optimize_allocation(self, total_budget, allocations, content_per_kol):
+    def optimize_allocation(self, total_budget, allocations, content_per_kol, selected_platforms):
         final_results = []
         unused_budget = 0
+        
+        # Iterate through each allocation group (Nano, Micro, etc.)
         for group_name, percent in allocations.items():
             sub_budget = total_budget * percent
             target_tiers = self.tier_groups[group_name]
-            res_df = self.optimize_segment(sub_budget, target_tiers, content_per_kol)
+            
+            # Pass selected_platforms to the segment optimizer
+            res_df = self.optimize_segment(sub_budget, target_tiers, content_per_kol, selected_platforms)
+            
             if not res_df.empty:
                 res_df['Group'] = group_name
                 res_df['Total_Cost'] = res_df['Participants'] * res_df['Pack_Cost']
@@ -99,12 +113,12 @@ class CampaignOptimizer:
         return pd.DataFrame(), total_budget
 
 # ==========================================
-# 2. STREAMLIT UI - AUTO BALANCING
+# 2. STREAMLIT UI
 # ==========================================
 st.set_page_config(page_title="Auto-Balancing Planner", layout="wide", page_icon="⚖️")
 
-st.title("⚖️ Smart Budget Planner (Auto-Balancing)")
-st.markdown("Simply adjust the sliders for the larger groups, and the **Nano (Seeding)** group will automatically balance the remaining budget to reach 100%.")
+st.title("⚖️ Smart Budget Planner (Multi-Platform)")
+st.markdown("Optimize budget allocation across different tiers and **specific platforms**.")
 
 # --- HISTORICAL TEMPLATES ---
 HISTORICAL_TEMPLATES = {
@@ -113,15 +127,14 @@ HISTORICAL_TEMPLATES = {
     
     "🚀 Launching (Mass Seeding)": 
         {'micro': 30, 'mid': 20, 'macro': 0, 'mega': 0, 
-         'desc': "Micro & Mid take 50%, the remaining 50% is automatically allocated to Nano for mass seeding."},
+         'desc': "Micro & Mid take 50%, remaining 50% for Nano seeding."},
          
     "💎 Branding (Big Image)": 
         {'micro': 0, 'mid': 10, 'macro': 40, 'mega': 50, 
-         'desc': "90% budget for Macro & Mega. Nano automatically drops to 0."},
+         'desc': "90% budget for Macro & Mega. Nano drops to 0."},
 }
 
 # --- SESSION STATE ---
-# Only need to store state for the 4 active sliders. Nano is calculated.
 defaults = {'micro': 20, 'mid': 20, 'macro': 20, 'mega': 20}
 for k, v in defaults.items():
     if f'alloc_{k}' not in st.session_state:
@@ -130,7 +143,6 @@ for k, v in defaults.items():
 def update_sliders():
     selected = st.session_state.template_selector
     vals = HISTORICAL_TEMPLATES[selected]
-    # Update the 4 main groups
     st.session_state['alloc_micro'] = vals['micro']
     st.session_state['alloc_mid'] = vals['mid']
     st.session_state['alloc_macro'] = vals['macro']
@@ -143,8 +155,25 @@ st.sidebar.header("1. Configuration")
 budget_input = st.sidebar.number_input("Total Budget ($)", value=22000, step=1000)
 content_input = st.sidebar.number_input("Content per KOL", value=1, min_value=1)
 
+# === NEW: PLATFORM SELECTION ===
 st.sidebar.markdown("---")
-st.sidebar.header("2. Select Strategy")
+st.sidebar.header("2. Platform Strategy")
+available_platforms = ['Instagram', 'TikTok', 'Twitter']
+selected_platforms = st.sidebar.multiselect(
+    "Select Active Platforms:",
+    options=available_platforms,
+    default=available_platforms, # Default selects all
+    help="The optimizer will only buy KOLs from these platforms."
+)
+
+if not selected_platforms:
+    st.sidebar.error("⚠️ Please select at least one platform!")
+    valid_platforms = False
+else:
+    valid_platforms = True
+
+st.sidebar.markdown("---")
+st.sidebar.header("3. Objective Strategy")
 template_choice = st.sidebar.selectbox(
     "Objective:",
     options=list(HISTORICAL_TEMPLATES.keys()),
@@ -155,56 +184,45 @@ template_choice = st.sidebar.selectbox(
 st.sidebar.info(HISTORICAL_TEMPLATES[template_choice]['desc'])
 
 st.sidebar.markdown("---")
-st.sidebar.header("3. Allocation (Nano Auto-fills)")
+st.sidebar.header("4. Allocation (Nano Auto-fills)")
 
 # 4 ACTIVE SLIDERS
-# User adjusts these 4
 a_micro = st.sidebar.slider("Micro (10K-50K)", 0, 100, st.session_state['alloc_micro'], key="slider_micro")
 a_mid = st.sidebar.slider("Mid (50K-150K)", 0, 100, st.session_state['alloc_mid'], key="slider_mid")
 a_macro = st.sidebar.slider("Macro (150K-500K)", 0, 100, st.session_state['alloc_macro'], key="slider_macro")
 a_mega = st.sidebar.slider("Mega (>500K)", 0, 100, st.session_state['alloc_mega'], key="slider_mega")
 
-# CALCULATE NANO (BALANCING)
+# CALCULATE NANO
 total_others = a_micro + a_mid + a_macro + a_mega
 a_nano_calc = 100 - total_others
 
-# VALIDATION & DISPLAY NANO
-valid = False
+valid_alloc = False
 if a_nano_calc < 0:
-    st.sidebar.error(f"⚠️ Total is {total_others}%. Please reduce by {abs(a_nano_calc)}%!")
+    st.sidebar.error(f"⚠️ Total is {total_others}%. Reduce by {abs(a_nano_calc)}%!")
     st.sidebar.progress(100, text="Nano: 0% (Over Budget)")
-    valid = False
 else:
-    # Display Nano as a Disabled Slider for visualization
-    st.sidebar.slider(
-        f"✅ Nano (1K-10K) - Auto Balanced", 
-        0, 100, a_nano_calc, 
-        disabled=True, 
-        key="slider_nano_display",
-        help="The Nano group automatically takes the remaining budget percentage."
-    )
-    if a_nano_calc > 0:
-        st.sidebar.info(f"Remaining {a_nano_calc}% allocated to Nano Seeding.")
-    valid = True
+    st.sidebar.slider(f"✅ Nano (1K-10K) - Auto Balanced", 0, 100, a_nano_calc, disabled=True, key="slider_nano_display")
+    valid_alloc = True
 
 # --- MAIN APP ---
 optimizer = CampaignOptimizer()
 
-if valid and st.button("🚀 Optimize Budget", type="primary"):
+# Only run if both Platforms and Allocation are valid
+if valid_platforms and valid_alloc and st.button("🚀 Optimize Budget", type="primary"):
     
-    # Map input -> Logic
     alloc_map = {
-        'Nano (1K-10K)':     a_nano_calc / 100.0, # Use calculated value
+        'Nano (1K-10K)':     a_nano_calc / 100.0,
         'Micro (10K-50K)':   a_micro / 100.0,
         'Mid (50K-150K)':    a_mid / 100.0,
         'Macro (150K-500K)': a_macro / 100.0,
         'Mega (>500K)':      a_mega / 100.0
     }
     
-    result_df, remainder = optimizer.optimize_allocation(budget_input, alloc_map, content_input)
+    # Pass selected_platforms to the optimizer
+    result_df, remainder = optimizer.optimize_allocation(budget_input, alloc_map, content_input, selected_platforms)
     
     if result_df.empty:
-        st.warning("No optimal plan found for this configuration.")
+        st.warning("No optimal plan found. Try increasing budget or selecting more platforms.")
     else:
         # Metrics
         c1, c2, c3, c4 = st.columns(4)
@@ -219,14 +237,14 @@ if valid and st.button("🚀 Optimize Budget", type="primary"):
         c_chart, c_data = st.columns([1, 1])
         
         with c_chart:
-            st.subheader("💰 Budget Allocation")
-            tier_order = ['Nano (1K-10K)', 'Micro (10K-50K)', 'Mid (50K-150K)', 'Macro (150K-500K)', 'Mega (>500K)']
-            # Reindex to ensure consistent order and color mapping
-            chart_df = result_df.groupby('Group')['Total_Cost'].sum().reindex(tier_order, fill_value=0).reset_index()
-            st.bar_chart(chart_df.set_index('Group'))
+            st.subheader("💰 Spend by Platform")
+            # Group by Platform to see where money goes
+            plat_spend = result_df.groupby('Platform')['Total_Cost'].sum().reset_index()
+            st.bar_chart(plat_spend.set_index('Platform'))
             
         with c_data:
             st.subheader("📊 Reach Distribution")
+            tier_order = ['Nano (1K-10K)', 'Micro (10K-50K)', 'Mid (50K-150K)', 'Macro (150K-500K)', 'Mega (>500K)']
             reach_df = result_df.groupby('Group')['Total_Reach'].sum().reindex(tier_order, fill_value=0).reset_index()
             st.bar_chart(reach_df.set_index('Group'), color="#00CC96")
 
